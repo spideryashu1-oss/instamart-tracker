@@ -2,16 +2,15 @@ import asyncio
 from playwright.async_api import async_playwright
 import aiohttp
 import re
-import time
+import os
 
 # ========= TELEGRAM =========
-BOT_TOKEN = "8558476155:AAGm5WeitSST46bVZEq_jySLD1T1Ag2iXDY"
-CHAT_IDS = ["7682951862", "1377959451", "8439994620"]  # Add more here
+BOT_TOKEN = os.getenv(""8558476155:AAGm5WeitSST46bVZEq_jySLD1T1Ag2iXDY")
+CHAT_IDS = os.getenv("7682951862", "1377959451").split(",")
 
 # ========= SETTINGS =========
 CART_URL = "https://www.swiggy.com/instamart/cart"
-TARGET_PRICE = 70
-CHECK_INTERVAL = 300  # 5 minutes
+TARGET_PRICE = int(os.getenv("TARGET_PRICE", "70"))
 
 
 # ---------------- TELEGRAM ----------------
@@ -20,14 +19,19 @@ async def send_single(session, chat_id, msg):
     try:
         async with session.post(url, data={"chat_id": chat_id, "text": msg}) as r:
             text = await r.text()
-            print(f"📩 Sent to {chat_id}:", text)
+            print(f"📩 Sent to {chat_id}: {text}")
     except Exception as e:
-        print(f"❌ Error sending to {chat_id}:", e)
+        print(f"❌ Error sending to {chat_id}: {e}")
 
 
 async def send_telegram(msg):
+    valid_chat_ids = [c.strip() for c in CHAT_IDS if c.strip()]
+    if not BOT_TOKEN or not valid_chat_ids:
+        print("⚠️ BOT_TOKEN or CHAT_IDS missing.")
+        return
+
     async with aiohttp.ClientSession() as session:
-        tasks = [send_single(session, chat_id, msg) for chat_id in CHAT_IDS]
+        tasks = [send_single(session, chat_id, msg) for chat_id in valid_chat_ids]
         await asyncio.gather(*tasks)
 
 
@@ -39,30 +43,32 @@ def extract_price(text):
     return None
 
 
-async def ensure_cart_loaded(page):
-    """Keep retrying until cart loads properly"""
-    while True:
+async def ensure_cart_loaded(page, max_attempts=5):
+    for attempt in range(1, max_attempts + 1):
+        print(f"🔄 Loading cart... attempt {attempt}/{max_attempts}")
         await page.goto(CART_URL, timeout=60000)
         await page.wait_for_timeout(5000)
         body_text = await page.inner_text("body")
 
         if "Something went wrong" in body_text:
-            print("⚠️ Error page detected. Trying Retry...")
+            print("⚠️ Error page detected. Trying retry/reload...")
             try:
                 await page.click("text=Retry", timeout=5000)
-            except:
-                print("Retry button not clickable. Reloading...")
+            except Exception:
                 await page.reload()
-            await asyncio.sleep(5)
+            await asyncio.sleep(3)
             continue
 
         if "₹" in body_text:
             print("✅ Cart loaded successfully.")
-            return
+            return True
 
         print("⚠️ Cart not loaded properly. Reloading...")
         await page.reload()
-        await asyncio.sleep(5)
+        await asyncio.sleep(3)
+
+    print("❌ Cart failed to load after max attempts.")
+    return False
 
 
 # ---------------- MAIN BOT ----------------
@@ -70,57 +76,67 @@ async def main():
     async with async_playwright() as p:
         context = await p.chromium.launch_persistent_context(
             user_data_dir="swiggy_profile",
-            headless= True,  # First login manually; change to True after login
-            args=["--disable-blink-features=AutomationControlled"]
+            headless=True,
+            args=[
+                "--disable-blink-features=AutomationControlled",
+                "--no-sandbox"
+            ]
         )
+
         page = await context.new_page()
-        print("➡️ BOT STARTED (Async Telegram Version)")
+        print("➡️ BOT STARTED")
 
         try:
-            while True:
-                print("\n🔄 Checking price...")
+            print("🔄 Checking price once...")
 
-                await ensure_cart_loaded(page)
+            loaded = await ensure_cart_loaded(page)
+            if not loaded:
+                await send_telegram("❌ Instamart cart failed to load.")
+                return
 
-                texts = await page.locator("text=/₹/").all_inner_texts()
-                print("📝 Raw texts:", texts)
+            texts = await page.locator("text=/₹/").all_inner_texts()
+            print("📝 Raw texts:", texts)
 
-                prices = [extract_price(t) for t in texts if extract_price(t) is not None]
-                print("💰 Extracted prices:", prices)
+            prices = [extract_price(t) for t in texts if extract_price(t) is not None]
+            print("💰 Extracted prices:", prices)
 
-                if not prices:
-                    print("⚠️ No prices found.")
-                    await asyncio.sleep(CHECK_INTERVAL)
-                    continue
+            if not prices:
+                print("⚠️ No prices found.")
+                await send_telegram("⚠️ No prices found in Instamart cart.")
+                return
 
-                mrp = None
-                item_price = None
+            mrp = None
+            item_price = None
 
-                for i in range(len(prices) - 1):
-                    if prices[i] > prices[i + 1]:
-                        mrp = prices[i]
-                        item_price = prices[i + 1]
-                        break
+            for i in range(len(prices) - 1):
+                if prices[i] > prices[i + 1]:
+                    mrp = prices[i]
+                    item_price = prices[i + 1]
+                    break
 
-                if item_price:
-                    print(f"✅ MRP: ₹{mrp} | PRICE: ₹{item_price}")
+            if item_price is not None:
+                print(f"✅ MRP: ₹{mrp} | PRICE: ₹{item_price}")
 
-                    if item_price <= TARGET_PRICE:
-                        print("🚨 Target reached! Sending alert...")
-                        await send_telegram(
-                            f"🚨 Instamart Price Alert\n\n"
-                            f"Item price: ₹{item_price}\n"
-                            f"MRP: ₹{mrp}\n"
-                            f"Target: ₹{TARGET_PRICE}"
-                        )
-                    else:
-                        print("⏳ Price above target.")
-
-                await asyncio.sleep(CHECK_INTERVAL)
-
-        except KeyboardInterrupt:
-            print("\n🛑 Bot stopped manually.")
-            await send_telegram("🛑 Bot stopped by @spideryashu")
+                if item_price <= TARGET_PRICE:
+                    print("🚨 Target reached! Sending alert...")
+                    await send_telegram(
+                        f"🚨 Instamart Price Alert\n\n"
+                        f"Item price: ₹{item_price}\n"
+                        f"MRP: ₹{mrp}\n"
+                        f"Target: ₹{TARGET_PRICE}"
+                    )
+                else:
+                    print("⏳ Price above target.")
+                    await send_telegram(
+                        f"ℹ️ Checked Instamart\n\n"
+                        f"Item price: ₹{item_price}\n"
+                        f"MRP: ₹{mrp}\n"
+                        f"Target: ₹{TARGET_PRICE}\n"
+                        f"Status: Above target"
+                    )
+            else:
+                print("⚠️ Could not determine item price and MRP.")
+                await send_telegram("⚠️ Could not determine item price and MRP.")
 
         except Exception as e:
             print("❌ Unexpected error:", e)
@@ -131,6 +147,5 @@ async def main():
             print("🔒 Browser closed.")
 
 
-# ---------------- RUN BOT ----------------
 if __name__ == "__main__":
     asyncio.run(main())
