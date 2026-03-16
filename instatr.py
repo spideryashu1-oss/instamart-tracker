@@ -70,7 +70,7 @@ async def main():
     async with async_playwright() as p:
         context = await p.chromium.launch_persistent_context(
             user_data_dir="swiggy_profile",
-            headless=True,  # First login manually; change to True after login
+            headless= true,  # First login manually; change to True after login
             args=["--disable-blink-features=AutomationControlled"]
         )
         page = await context.new_page()
